@@ -391,6 +391,7 @@ control acl_ingress(in headers_t headers,
 
   @p4runtime_role(P4RUNTIME_ROLE_SDN_CONTROLLER)
   @id(ACL_INGRESS_COUNTING_TABLE_ID)
+  @sai_acl_priority(7)
   @sai_acl(INGRESS)
   @entry_restriction("
     // Only allow IP field matches for IP packets.
@@ -451,8 +452,7 @@ control acl_ingress(in headers_t headers,
   ")
   action redirect_to_ipmc_group(
     @sai_action_param(SAI_ACL_ENTRY_ATTR_ACTION_REDIRECT)
-    // TODO: Add this once supported by PDPI and its customers.
-    // @refers_to(multicast_group_table, multicast_group_id)
+    @refers_to(builtin::multicast_group_table, multicast_group_id)
     multicast_group_id_t multicast_group_id) {
     standard_metadata.mcast_grp = multicast_group_id;
 
@@ -465,6 +465,7 @@ control acl_ingress(in headers_t headers,
   // ACL table that mirrors and redirects packets.
   @id(ACL_INGRESS_MIRROR_AND_REDIRECT_TABLE_ID)
   @sai_acl(INGRESS)
+  @sai_acl_priority(15)
   @p4runtime_role(P4RUNTIME_ROLE_SDN_CONTROLLER)
   @entry_restriction("
     // Only allow IP field matches for IP packets.
@@ -541,6 +542,7 @@ control acl_ingress(in headers_t headers,
         @unsupported;
     }
     actions = {
+      @proto_id(4) acl_forward();
       @proto_id(1) acl_mirror();
       @proto_id(2) redirect_to_nexthop();
       @proto_id(3) redirect_to_ipmc_group();
@@ -553,6 +555,7 @@ control acl_ingress(in headers_t headers,
   // ACL table that only drops or denies packets, and is otherwise a no-op.
   @id(ACL_INGRESS_SECURITY_TABLE_ID)
   @sai_acl(INGRESS)
+  @sai_acl_priority(20)
   @p4runtime_role(P4RUNTIME_ROLE_SDN_CONTROLLER)
   @entry_restriction("
     // Forbid using ether_type for IP packets (by convention, use is_ip* instead).
