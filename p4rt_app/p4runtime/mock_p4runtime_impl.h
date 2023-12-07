@@ -20,6 +20,8 @@
 #include "p4rt_app/p4runtime/cpu_queue_translator.h"
 #include "p4rt_app/p4runtime/p4runtime_impl.h"
 #include "gmock/gmock.h"
+#include "p4rt_app/sonic/adapters/fake_intf_translator.h"
+#include "swss/warm_restart.h"
 
 namespace p4rt_app {
 
@@ -75,11 +77,13 @@ public:
   MOCK_METHOD(void, SetCpuQueueTranslator,
               (std::unique_ptr<CpuQueueTranslator>), (override));
 
-  /* TODO(PINS): To handle Component, System & Interface Translator in November
-   release. private: swss::MockComponentStateHelper
-   mock_component_state_helper_; swss::MockSystemStateHelper
-   mock_system_state_helper_; */
-  //  sonic::FakeIntfTranslator fake_intf_translator_{/*enabled=*/true};
+  MOCK_METHOD(absl::Status, HandleWarmBootNotification,
+              (swss::WarmStart::WarmBootNotification notification), (override));
+
+ private:
+  swss::MockComponentStateHelper mock_component_state_helper_;
+  swss::MockSystemStateHelper mock_system_state_helper_;
+  sonic::FakeIntfTranslator fake_intf_translator_{/*enabled=*/true};
 };
 
 } // namespace p4rt_app
