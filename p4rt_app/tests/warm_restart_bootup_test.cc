@@ -216,6 +216,9 @@ class WarmRestartTest : public testing::Test {
     EXPECT_EQ(p4rt_service_->GetWarmBootStateAdapterForUtilOnly()
                   ->GetOrchAgentWarmBootState(),
               oa_wb_state);
+    // TODO: If ShouldWaitForGlobalUnfreeze() == false in DB,
+    // then listen to OA WarmBoot state, unfreeze p4runtime_server when OA
+    // is reconciled.
     if (p4rt_recon_status.ok() &&
         !p4rt_service_->GetWarmRestartUtil().ShouldWaitForGlobalUnfreeze() &&
         p4rt_service_->GetWarmRestartUtil().IsOrchAgentWarmBootReconciled()) {

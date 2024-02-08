@@ -477,10 +477,9 @@ int main(int argc, char** argv) {
     if (reconciliation_status.ok()) {
       swss::WarmStart::setWarmStartState(
           "p4rt", swss::WarmStart::WarmStartState::RECONCILED);
-      // If ShouldWaitForGlobalUnfreeze() == false in DB AND
-      // IsOrchAgentWarmBootReconciled() == true, then unfreeze P4RT server.
-      // Otherwise, keep p4runtimer_server
-      // frozen until unfreeze notification is received.
+      // TODO: If ShouldWaitForGlobalUnfreeze() == false in DB,
+      // then listen to OA WarmBoot state, unfreeze p4runtime_server when OA
+      // is reconciled.
       if (!warm_restart_util.ShouldWaitForGlobalUnfreeze() &&
           warm_restart_util.IsOrchAgentWarmBootReconciled()) {
         p4runtime_server.SetFreezeMode(/*freeze_mode=*/false);
