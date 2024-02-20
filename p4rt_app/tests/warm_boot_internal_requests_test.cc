@@ -159,8 +159,7 @@ TEST_F(WarmBootInternalRequestsTest,
   EXPECT_EQ(p4rt_service_.GetWarmBootStateAdapter()->GetWarmBootState(),
             swss::WarmStart::WarmStartState::QUIESCENT);
 
-  EXPECT_OK(p4rt_service_.GetP4rtServer().VerifyState(
-      /*update_component_state=*/true));
+  EXPECT_OK(p4rt_service_.GetP4rtServer().VerifyState());
   EXPECT_EQ(p4rt_service_.GetWarmBootStateAdapter()->GetWarmBootState(),
             swss::WarmStart::WarmStartState::QUIESCENT);
 
@@ -170,8 +169,7 @@ TEST_F(WarmBootInternalRequestsTest,
   EXPECT_EQ(p4rt_service_.GetWarmBootStateAdapter()->GetWarmBootState(),
             swss::WarmStart::WarmStartState::FAILED);
 
-  EXPECT_OK(p4rt_service_.GetP4rtServer().VerifyState(
-      /*update_component_state=*/true));
+  EXPECT_OK(p4rt_service_.GetP4rtServer().VerifyState());
   EXPECT_EQ(p4rt_service_.GetWarmBootStateAdapter()->GetWarmBootState(),
             swss::WarmStart::WarmStartState::FAILED);
 }

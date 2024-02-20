@@ -145,9 +145,9 @@ TEST_F(WarmBootPacketInTest, PacketInAfterUnfreezeIsSent) {
 
   // Push the expected PacketIn.
   EXPECT_OK(p4rt_service_.GetFakePacketIoInterface().PushPacketIn(
-      "Ethernet1_1_0", "Ethernet1_1_1", "test packet1"));
+      "Ethernet1/1/0", "Ethernet1/1/1", "test packet1"));
   EXPECT_OK(p4rt_service_.GetFakePacketIoInterface().PushPacketIn(
-      "Ethernet1_1_1", "Ethernet1_1_0", "test packet2"));
+      "Ethernet1/1/1", "Ethernet1/1/0", "test packet2"));
 
   sonic::PacketIoCounters counters =
       p4rt_service_.GetP4rtServer().GetPacketIoCounters();
