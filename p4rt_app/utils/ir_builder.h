@@ -115,10 +115,9 @@ class IrActionProfileDefinitionBuilder {
     return *this;
   }
 
-  private:
-   pdpi::IrActionProfileDefinition action_profile_;
+ private:
+  pdpi::IrActionProfileDefinition action_profile_;
 };
-
 
 class IrActionDefinitionBuilder {
 public:
@@ -350,7 +349,8 @@ public:
       const IrActionProfileDefinitionBuilder& builder) {
     return action_profile(builder());
   }
-private:
+
+ private:
   pdpi::IrP4Info p4info_;
   // Current ID numbers for ID auto-generation.
   int table_id_ = 0;

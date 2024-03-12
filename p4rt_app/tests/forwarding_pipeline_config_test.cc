@@ -13,6 +13,7 @@
 // limitations under the License.
 #include <cstdint>
 #include <cstdlib>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -20,6 +21,8 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
@@ -41,6 +44,7 @@
 #include "p4_pdpi/p4_runtime_session.h"
 #include "p4_pdpi/utils/annotation_parser.h"
 #include "p4rt_app/p4runtime/p4runtime_impl.h"
+#include "p4rt_app/sonic/adapters/fake_sonic_db_table.h"
 #include "p4rt_app/tests/lib/app_db_entry_builder.h"
 #include "p4rt_app/tests/lib/p4runtime_grpc_service.h"
 #include "sai_p4/instantiations/google/clos_stage.h"
@@ -51,6 +55,9 @@
 #include "gtest/gtest.h"
 //TODO(PINS): Add Component State Helper
 //#include "swss/component_state_helper_interface.h"
+#include "sai_p4/instantiations/google/test_tools/table_entry_generator.h"
+#include "sai_p4/instantiations/google/test_tools/table_entry_generator_helper.h"
+#include "sai_p4/tools/p4info_tools.h"
 
 namespace p4rt_app {
 namespace {
@@ -63,9 +70,11 @@ using ::p4::v1::GetForwardingPipelineConfigResponse;
 using ::p4::v1::SetForwardingPipelineConfigRequest;
 using ::testing::Contains;
 using ::testing::ExplainMatchResult;
+using ::testing::HasSubstr;
 using ::testing::IsEmpty;
 using ::testing::Key;
 using ::testing::Not;
+using ::testing::UnorderedElementsAreArray;
 
 MATCHER_P2(TimeIsBetween, start, end,
            absl::StrCat("Has a value between '", absl::FormatTime(start),
@@ -113,6 +122,105 @@ MATCHER_P2(ContainsConfigTimeBetween, start, end,
     return false;
   }
   return true;
+}
+
+template <typename T>
+void ExtractReferences(const T& annotations,
+                       absl::flat_hash_set<std::string>& refs) {
+  auto result = pdpi::GetAllAnnotationsAsArgList("refers_to", annotations);
+  if (result.ok()) {
+    for (const auto& arg_list : *result) {
+      refs.insert(std::make_move_iterator(arg_list.begin()),
+                  std::make_move_iterator(arg_list.end()));
+    }
+  }
+  result = pdpi::GetAllAnnotationsAsArgList("referenced_by", annotations);
+  if (result.ok()) {
+    for (const auto& arg_list : *result) {
+      refs.insert(std::make_move_iterator(arg_list.begin()),
+                  std::make_move_iterator(arg_list.end()));
+    }
+  }
+}
+
+const absl::flat_hash_set<std::string>& AliasesToKeep() {
+  static const auto* const kAliases = []() {
+    const p4::config::v1::P4Info& p4info = sai::GetUnionedP4Info();
+    auto* aliases = new absl::flat_hash_set<std::string>();
+    for (const auto& table : p4info.tables()) {
+      ExtractReferences(table.preamble().annotations(), *aliases);
+      for (const auto& match_field : table.match_fields()) {
+        ExtractReferences(match_field.annotations(), *aliases);
+      }
+    }
+    for (const auto& action : p4info.actions()) {
+      ExtractReferences(action.preamble().annotations(), *aliases);
+      for (const auto& param : action.params()) {
+        ExtractReferences(param.annotations(), *aliases);
+      }
+    }
+    for (const auto& action_profile : p4info.action_profiles()) {
+      ExtractReferences(action_profile.preamble().annotations(), *aliases);
+    }
+    return aliases;
+  }();
+  return *kAliases;
+}
+
+// Erase a member from a collection if its alias matches the designated value.
+// Returns true if a value was removed.
+template <typename T>
+bool EraseByAlias(T& collection, absl::string_view alias) {
+  for (auto action = collection.begin(); action != collection.end(); ++action) {
+    if (action->preamble().alias() == alias) {
+      collection.erase(action);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Erase a matching annotation from the annotation list.
+// Returns true if an annotation was removed.
+template <typename T>
+bool EraseAnnotation(T& annotations, absl::string_view label,
+                     absl::string_view value) {
+  for (auto annotation = annotations.begin(); annotation != annotations.end();
+       ++annotation) {
+    auto components = pdpi::ParseAnnotation(*annotation);
+    if (components.ok() && components->label == label &&
+        components->body == value) {
+      annotations.erase(annotation);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Remove the specified annotation from all actions in the p4info.
+// Returns the number of modified actions;
+int RemoveAnnotationFromAllActions(p4::config::v1::P4Info& p4info,
+                                   absl::string_view label,
+                                   absl::string_view value) {
+  int modified = 0;
+  for (auto& action : *p4info.mutable_actions()) {
+    if (EraseAnnotation(*action.mutable_preamble()->mutable_annotations(),
+                        label, value)) {
+      ++modified;
+    }
+  }
+  return modified;
+}
+
+absl::StatusOr<absl::flat_hash_map<std::string, sonic::SonicDbEntryMap>>
+DbState(const sonic::FakeSonicDbTable& table) {
+  absl::flat_hash_map<std::string, sonic::SonicDbEntryMap> db_state;
+  auto keys = table.GetAllKeys();
+  for (const std::string& key : keys) {
+    ASSIGN_OR_RETURN(auto entry, table.ReadTableEntry(key));
+    db_state[key] = entry;
+  }
+  return db_state;
 }
 
 // Get a writeable directory where bazel tests can save output files to.
@@ -526,6 +634,246 @@ TEST_F(ReconcileAndCommitTest, SetDuplicateForwardingPipelineConfig) {
 
   ASSERT_OK(p4rt_session_->SetForwardingPipelineConfig(request));
   EXPECT_OK(p4rt_session_->SetForwardingPipelineConfig(request));
+}
+
+TEST_F(ReconcileAndCommitTest, DeletingEmptyFixedTablesIsAllowed) {
+  auto request = GetBasicForwardingRequest();
+  request.set_action(SetForwardingPipelineConfigRequest::RECONCILE_AND_COMMIT);
+  *request.mutable_config()->mutable_p4info() =
+      sai::GetP4Info(sai::Instantiation::kMiddleblock);
+
+  ASSERT_OK(p4rt_session_->SetForwardingPipelineConfig(request));
+
+  auto& tables = *request.mutable_config()->mutable_p4info()->mutable_tables();
+  for (auto table = tables.begin(); table != tables.end();) {
+    if (absl::StartsWith(table->preamble().alias(), "acl_") ||
+        AliasesToKeep().contains(table->preamble().alias())) {
+      ++table;
+    } else {
+      table = tables.erase(table);
+    }
+  }
+  ASSERT_OK(p4rt_session_->SetForwardingPipelineConfig(request));
+}
+
+TEST_F(ReconcileAndCommitTest, AddingFixedTablesIsAllowed) {
+  auto request = GetBasicForwardingRequest();
+  request.set_action(SetForwardingPipelineConfigRequest::RECONCILE_AND_COMMIT);
+  *request.mutable_config()->mutable_p4info() =
+      sai::GetP4Info(sai::Instantiation::kMiddleblock);
+
+  // Apply config without non-acl tables.
+  auto& tables = *request.mutable_config()->mutable_p4info()->mutable_tables();
+  for (auto table = tables.begin(); table != tables.end();) {
+    if (absl::StartsWith(table->preamble().alias(), "acl_") ||
+        AliasesToKeep().contains(table->preamble().alias())) {
+      ++table;
+    } else {
+      table = tables.erase(table);
+    }
+  }
+  ASSERT_OK(p4rt_session_->SetForwardingPipelineConfig(request));
+
+  // Apply config with fixed tables.
+  *request.mutable_config()->mutable_p4info() =
+      sai::GetP4Info(sai::Instantiation::kMiddleblock);
+  ASSERT_OK(p4rt_session_->SetForwardingPipelineConfig(request));
+}
+
+TEST_F(ReconcileAndCommitTest, ModifyingEmptyFixedTablesIsAllowed) {
+  auto request = GetBasicForwardingRequest();
+  request.set_action(SetForwardingPipelineConfigRequest::RECONCILE_AND_COMMIT);
+  *request.mutable_config()->mutable_p4info() =
+      sai::GetP4Info(sai::Instantiation::kMiddleblock);
+
+  ASSERT_OK(p4rt_session_->SetForwardingPipelineConfig(request));
+
+  // Remove some fixed table match fields.
+  auto& tables = *request.mutable_config()->mutable_p4info()->mutable_tables();
+  for (auto& table : tables) {
+    if (absl::StartsWith(table.preamble().alias(), "acl")) continue;
+    if (table.match_fields().size() < 2) continue;  // All tables need a match.
+    auto constraints = pdpi::GetAnnotationBody("entry_restriction",
+                                               table.preamble().annotations());
+    for (auto match_field = table.mutable_match_fields()->begin();
+         match_field != table.mutable_match_fields()->end(); ++match_field) {
+      if (AliasesToKeep().contains(match_field->name()) ||
+          (constraints.ok() &&
+           absl::StrContains(*constraints, match_field->name()))) {
+        continue;
+      }
+      table.mutable_match_fields()->erase(match_field);
+      break;
+    }
+  }
+  ASSERT_OK(p4rt_session_->SetForwardingPipelineConfig(request));
+}
+
+TEST_F(ReconcileAndCommitTest, CanReconcileHashingConfigDiff) {
+  // Create and push an original p4info.
+  p4::config::v1::P4Info original =
+      sai::GetP4Info(sai::Instantiation::kMiddleblock);
+  ASSERT_TRUE(
+      EraseByAlias(*original.mutable_actions(), "compute_ecmp_hash_ipv4"));
+  ASSERT_GT(RemoveAnnotationFromAllActions(original, "sai_native_hash_field",
+                                           "SAI_NATIVE_HASH_FIELD_L4_SRC_PORT"),
+            0);
+  ASSERT_TRUE(sai::SetSaiHashSeed(original, 10000));
+
+  auto request = GetBasicForwardingRequest();
+  request.set_action(SetForwardingPipelineConfigRequest::RECONCILE_AND_COMMIT);
+  *request.mutable_config()->mutable_p4info() = original;
+  ASSERT_OK(p4rt_session_->SetForwardingPipelineConfig(request));
+
+  // Create and push the modified p4info.
+  p4::config::v1::P4Info modified =
+      sai::GetP4Info(sai::Instantiation::kMiddleblock);
+  ASSERT_TRUE(
+      EraseByAlias(*modified.mutable_actions(), "compute_ecmp_hash_ipv6"));
+  ASSERT_GT(RemoveAnnotationFromAllActions(modified, "sai_native_hash_field",
+                                           "SAI_NATIVE_HASH_FIELD_L4_DST_PORT"),
+            0);
+
+  *request.mutable_config()->mutable_p4info() = modified;
+  ASSERT_OK(p4rt_session_->SetForwardingPipelineConfig(request));
+
+  // Grab hashing state from the modified push.
+  ASSERT_OK_AND_ASSIGN(auto reconciled_switch_table_state,
+                       DbState(p4rt_service_->GetSwitchAppDbTable()));
+  ASSERT_OK_AND_ASSIGN(auto reconciled_hash_table_state,
+                       DbState(p4rt_service_->GetHashAppDbTable()));
+
+  // Compare against a fresh push of the modified P4Info.
+  ASSERT_OK(ResetGrpcServerAndClient());
+  request = GetBasicForwardingRequest();
+  request.set_action(SetForwardingPipelineConfigRequest::RECONCILE_AND_COMMIT);
+  *request.mutable_config()->mutable_p4info() = modified;
+  ASSERT_OK(p4rt_session_->SetForwardingPipelineConfig(request));
+  ASSERT_OK_AND_ASSIGN(auto fresh_switch_table_state,
+                       DbState(p4rt_service_->GetSwitchAppDbTable()));
+  ASSERT_OK_AND_ASSIGN(auto fresh_hash_table_state,
+                       DbState(p4rt_service_->GetHashAppDbTable()));
+
+  std::vector<std::string> reconciled_switch_table_keys;
+  for (const auto& [key, _] : reconciled_switch_table_state) {
+    reconciled_switch_table_keys.push_back(key);
+  }
+  ASSERT_THAT(reconciled_switch_table_keys,
+              UnorderedElementsAreArray(
+                  p4rt_service_->GetSwitchAppDbTable().GetAllKeys()));
+
+  std::vector<std::string> reconciled_hash_table_keys;
+  for (const auto& [key, _] : reconciled_hash_table_state) {
+    reconciled_hash_table_keys.push_back(key);
+  }
+  ASSERT_THAT(reconciled_hash_table_keys,
+              UnorderedElementsAreArray(
+                  p4rt_service_->GetHashAppDbTable().GetAllKeys()));
+
+  for (const auto& key : reconciled_switch_table_keys) {
+    EXPECT_THAT(reconciled_switch_table_state[key],
+                UnorderedElementsAreArray(fresh_switch_table_state[key]));
+  }
+  for (const auto& key : reconciled_hash_table_keys) {
+    EXPECT_THAT(reconciled_hash_table_state[key],
+                UnorderedElementsAreArray(fresh_hash_table_state[key]));
+  }
+}
+
+p4::v1::TableEntry WcmpTableEntry(const pdpi::IrP4Info& ir_p4info, int id,
+                                  int64_t weight, int groups) {
+  const auto& profile =
+      ir_p4info.action_profiles_by_name().at("wcmp_group_selector");
+
+  int table_id = profile.action_profile().table_ids(0);
+  int action_id = ir_p4info.tables_by_id()
+                      .at(table_id)
+                      .entry_actions(0)
+                      .action()
+                      .preamble()
+                      .id();
+
+  p4::v1::TableEntry table_entry;
+  table_entry.set_table_id(table_id);
+  table_entry.add_match()->set_field_id(1);
+  table_entry.mutable_match(0)->mutable_exact()->set_value(
+      absl::StrCat("wcmp_group_", id));
+
+  p4::v1::ActionProfileAction base_action;
+  base_action.set_weight(weight);
+  base_action.mutable_action()->set_action_id(action_id);
+  base_action.mutable_action()->add_params()->set_param_id(1);
+
+  for (int i = 0; i < groups; ++i) {
+    auto& action = *table_entry.mutable_action()
+                        ->mutable_action_profile_action_set()
+                        ->add_action_profile_actions();
+    action = base_action;
+    action.mutable_action()->mutable_params(0)->set_value(
+        absl::StrCat("nexthop-", i));
+  }
+
+  return table_entry;
+}
+
+TEST_F(ReconcileAndCommitTest, CanReconcileActionProfileCapacityDiff) {
+  // Create and push an original p4info.
+  p4::config::v1::P4Info original =
+      sai::GetP4Info(sai::Instantiation::kMiddleblock);
+  auto request = GetBasicForwardingRequest();
+  request.set_action(SetForwardingPipelineConfigRequest::RECONCILE_AND_COMMIT);
+  *request.mutable_config()->mutable_p4info() = original;
+  ASSERT_OK(p4rt_session_->SetForwardingPipelineConfig(request));
+
+  // Program an entry with some resource usage.
+  pdpi::IrP4Info ir_p4info = sai::GetIrP4Info(sai::Instantiation::kMiddleblock);
+  p4::v1::WriteRequest write_request;
+  write_request.set_device_id(p4rt_session_->DeviceId());
+  write_request.set_role(p4rt_session_->Role());
+  *write_request.mutable_election_id() = p4rt_session_->ElectionId();
+  auto& update = *write_request.add_updates();
+  update.set_type(p4::v1::Update::INSERT);
+  *update.mutable_entity()->mutable_table_entry() =
+      WcmpTableEntry(ir_p4info, /*id=*/1, /*weight=*/100, /*groups=*/10);
+  ASSERT_OK(p4rt_session_->Write(write_request));
+
+  // Create and push the modified p4info.
+  p4::config::v1::P4Info modified = original;
+  for (auto& profile : *modified.mutable_action_profiles()) {
+    if (profile.preamble().alias() == "wcmp_group_selector") {
+      profile.set_size(1001);
+      profile.set_max_group_size(600);
+      break;
+    }
+  }
+  *request.mutable_config()->mutable_p4info() = modified;
+  ASSERT_OK(p4rt_session_->SetForwardingPipelineConfig(request));
+
+  // Attempt to program another entry. We should fail due to lack of resources.
+  *update.mutable_entity()->mutable_table_entry() =
+      WcmpTableEntry(ir_p4info, /*id=*/2, /*weight=*/2, /*groups=*/1);
+  ASSERT_THAT(
+      p4rt_session_->Write(write_request),
+      StatusIs(absl::StatusCode::kUnknown, HasSubstr("RESOURCE_EXHAUSTED")));
+
+  // We should be able to program up to the new limit.
+  *update.mutable_entity()->mutable_table_entry() =
+      WcmpTableEntry(ir_p4info, /*id=*/2, /*weight=*/1, /*groups=*/1);
+  ASSERT_OK(p4rt_session_->Write(write_request));
+
+  // Remove the original entry to free up space.
+  *update.mutable_entity()->mutable_table_entry() =
+      WcmpTableEntry(ir_p4info, /*id=*/1, /*weight=*/10, /*groups=*/10);
+  update.set_type(p4::v1::Update::DELETE);
+  ASSERT_OK(p4rt_session_->Write(write_request));
+  update.set_type(p4::v1::Update::INSERT);
+
+  // A new entry with too many actions should fail.
+  *update.mutable_entity()->mutable_table_entry() =
+      WcmpTableEntry(ir_p4info, /*id=*/1, /*weight=*/1, /*groups=*/601);
+  ASSERT_THAT(
+      p4rt_session_->Write(write_request),
+      StatusIs(absl::StatusCode::kUnknown, HasSubstr("RESOURCE_EXHAUSTED")));
 }
 
 using GetForwardingConfigTest = ForwardingPipelineConfigTest;
