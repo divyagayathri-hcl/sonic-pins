@@ -18,8 +18,6 @@
 #include <string>
 #include <vector>
 
-#include "absl/algorithm/container.h"
-#include "absl/container/btree_map.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
@@ -472,6 +470,7 @@ absl::Status UnionFirstTypeInfoIntoSecond(
             "were different: $2",
             __func__, it->first, *diff_result));
       }
+    } else {
       (*unioned_info.mutable_type_info()->mutable_new_types())[type_name] =
           type_spec;
     }
