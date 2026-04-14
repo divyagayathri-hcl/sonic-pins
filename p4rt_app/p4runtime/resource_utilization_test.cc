@@ -634,5 +634,328 @@ TEST_F(GetTableResourceChangeTest, PacketReplicationEntriesIgnored) {
   EXPECT_EQ(resources.action_profile, std::nullopt);
 }
 
+TEST(VerifyCapacityAndGetTableResourceChangeTest,
+     ValidWeightIsAcceptedInSumOfWeights) {
+  constexpr int kSize = 12000;
+  constexpr int kMaxGroupSize = 512;
+  constexpr int kActionProfileId = 3;
+  constexpr absl::string_view kActionProfileName = "wcmp_selector_profile";
+  const IrActionDefinitionBuilder no_action_builder =
+      IrActionDefinitionBuilder().name("NoAction");
+
+  const pdpi::IrP4Info ir_p4info =
+      IrP4InfoBuilder()
+          .table(IrTableDefinitionBuilder()
+                     .name("wcmp_group_table")
+                     .match_field(R"pb(
+                                    id: 1
+                                    name: "wcmp_group_id"
+                                    match_type: EXACT
+                                  )pb",
+                                  pdpi::Format::STRING)
+                     .entry_action(no_action_builder)
+                     .size(100))
+          .action(no_action_builder)
+          .action_profile(IrActionProfileDefinitionBuilder()
+                              .id(kActionProfileId)
+                              .name(kActionProfileName)
+                              .max_sum_of_weights(kSize, kMaxGroupSize)
+                              .table_ids({1}))();
+
+  ASSERT_OK_AND_ASSIGN(EntityUpdate update,
+                       GetUpdate(ir_p4info, p4::v1::Update::INSERT,
+                                 R"pb(
+                                   table_entry {
+                                     table_name: "wcmp_group_table"
+                                     matches {
+                                       name: "wcmp_group_id"
+                                       exact { str: "group-1" }
+                                     }
+                                     action_set {
+                                       actions {
+                                         action { name: "NoAction" }
+                                         weight: 5
+                                       }
+                                     }
+                                   })pb"));
+
+  absl::flat_hash_map<std::string, ActionProfileResourceCapacity>
+      capacity_by_action_profile_name = {
+          {std::string(kActionProfileName),
+           GetActionProfileResourceCapacity(
+               ir_p4info.action_profiles_by_id().at(kActionProfileId))},
+      };
+  absl::flat_hash_map<std::string, int64_t> current_batch_resources;
+
+  EXPECT_THAT(VerifyCapacityAndGetTableResourceChange(
+                  ir_p4info, update, /*entity_cache=*/{},
+                  capacity_by_action_profile_name, current_batch_resources),
+              IsOk());
+}
+
+TEST(VerifyCapacityAndGetTableResourceChangeTest,
+     VeryHighWeightIsAcceptedInSumOfMembers) {
+  constexpr int kSize = 12000;
+  constexpr int kMaxGroupSize = 512;
+  // Greater than size.
+  constexpr int kMaxMemberWeight = 60000;
+  constexpr int kActionProfileId = 3;
+  constexpr absl::string_view kActionProfileName = "wcmp_selector_profile";
+  const IrActionDefinitionBuilder no_action_builder =
+      IrActionDefinitionBuilder().name("NoAction");
+
+  const pdpi::IrP4Info ir_p4info =
+      IrP4InfoBuilder()
+          .table(IrTableDefinitionBuilder()
+                     .name("wcmp_group_table")
+                     .match_field(R"pb(
+                                    id: 1
+                                    name: "wcmp_group_id"
+                                    match_type: EXACT
+                                  )pb",
+                                  pdpi::Format::STRING)
+                     .entry_action(no_action_builder)
+                     .size(100))
+          .action(no_action_builder)
+          .action_profile(
+              IrActionProfileDefinitionBuilder()
+                  .id(kActionProfileId)
+                  .name(kActionProfileName)
+                  .max_sum_of_members(kSize, kMaxGroupSize, kMaxMemberWeight)
+                  .table_ids({1}))();
+
+  ASSERT_OK_AND_ASSIGN(EntityUpdate update,
+                       GetUpdate(ir_p4info, p4::v1::Update::INSERT,
+                                 R"pb(
+                                   table_entry {
+                                     table_name: "wcmp_group_table"
+                                     matches {
+                                       name: "wcmp_group_id"
+                                       exact { str: "group-1" }
+                                     }
+                                     action_set {
+                                       actions {
+                                         action { name: "NoAction" }
+                                         # More than the size.
+                                         weight: 30000
+                                       }
+                                       actions {
+                                         action { name: "NoAction" }
+                                         # More than the size again.
+                                         weight: 35000
+                                       }
+                                     }
+                                   })pb"));
+
+  absl::flat_hash_map<std::string, ActionProfileResourceCapacity>
+      capacity_by_action_profile_name = {
+          {std::string(kActionProfileName),
+           GetActionProfileResourceCapacity(
+               ir_p4info.action_profiles_by_id().at(kActionProfileId))},
+      };
+  absl::flat_hash_map<std::string, int64_t> current_batch_resources;
+
+  EXPECT_THAT(VerifyCapacityAndGetTableResourceChange(
+                  ir_p4info, update, /*entity_cache=*/{},
+                  capacity_by_action_profile_name, current_batch_resources),
+              IsOk());
+}
+
+TEST(VerifyCapacityAndGetTableResourceChangeTest,
+     RejectsTooMuchWeightInSumOfWeights) {
+  constexpr int kSize = 10;
+  constexpr int kMaxGroupSize = 512;
+  constexpr int kActionProfileId = 3;
+  constexpr absl::string_view kActionProfileName = "wcmp_selector_profile";
+  const IrActionDefinitionBuilder no_action_builder =
+      IrActionDefinitionBuilder().name("NoAction");
+
+  const pdpi::IrP4Info ir_p4info =
+      IrP4InfoBuilder()
+          .table(IrTableDefinitionBuilder()
+                     .name("wcmp_group_table")
+                     .match_field(R"pb(
+                                    id: 1
+                                    name: "wcmp_group_id"
+                                    match_type: EXACT
+                                  )pb",
+                                  pdpi::Format::STRING)
+                     .entry_action(no_action_builder)
+                     .size(100))
+          .action(no_action_builder)
+          .action_profile(IrActionProfileDefinitionBuilder()
+                              .id(kActionProfileId)
+                              .name(kActionProfileName)
+                              .max_sum_of_weights(kSize, kMaxGroupSize)
+                              .table_ids({1}))();
+
+  ASSERT_OK_AND_ASSIGN(EntityUpdate update,
+                       GetUpdate(ir_p4info, p4::v1::Update::INSERT,
+                                 R"pb(
+                                   table_entry {
+                                     table_name: "wcmp_group_table"
+                                     matches {
+                                       name: "wcmp_group_id"
+                                       exact { str: "group-1" }
+                                     }
+                                     action_set {
+                                       actions {
+                                         action { name: "NoAction" }
+                                         # More than the size.
+                                         weight: 100
+                                       }
+                                     }
+                                   })pb"));
+
+  absl::flat_hash_map<std::string, ActionProfileResourceCapacity>
+      capacity_by_action_profile_name = {
+          {std::string(kActionProfileName),
+           GetActionProfileResourceCapacity(
+               ir_p4info.action_profiles_by_id().at(kActionProfileId))},
+      };
+  absl::flat_hash_map<std::string, int64_t> current_batch_resources;
+
+  EXPECT_THAT(VerifyCapacityAndGetTableResourceChange(
+                  ir_p4info, update, /*entity_cache=*/{},
+                  capacity_by_action_profile_name, current_batch_resources),
+              StatusIs(absl::StatusCode::kResourceExhausted));
+}
+
+TEST(VerifyCapacityAndGetTableResourceChangeTest,
+     RejectsTooMuchWeightInASingleRequestSumOfWeights) {
+  constexpr int kSize = 12000;
+  constexpr int kMaxGroupSize = 512;
+  constexpr int kActionProfileId = 3;
+  constexpr absl::string_view kActionProfileName = "wcmp_selector_profile";
+  const IrActionDefinitionBuilder no_action_builder =
+      IrActionDefinitionBuilder().name("NoAction");
+
+  const pdpi::IrP4Info ir_p4info =
+      IrP4InfoBuilder()
+          .table(IrTableDefinitionBuilder()
+                     .name("wcmp_group_table")
+                     .match_field(R"pb(
+                                    id: 1
+                                    name: "wcmp_group_id"
+                                    match_type: EXACT
+                                  )pb",
+                                  pdpi::Format::STRING)
+                     .entry_action(no_action_builder)
+                     .size(100))
+          .action(no_action_builder)
+          .action_profile(IrActionProfileDefinitionBuilder()
+                              .id(kActionProfileId)
+                              .name(kActionProfileName)
+                              .max_sum_of_weights(kSize, kMaxGroupSize)
+                              .table_ids({1}))();
+
+  ASSERT_OK_AND_ASSIGN(EntityUpdate update,
+                       GetUpdate(ir_p4info, p4::v1::Update::INSERT,
+                                 R"pb(
+                                   table_entry {
+                                     table_name: "wcmp_group_table"
+                                     matches {
+                                       name: "wcmp_group_id"
+                                       exact { str: "group-1" }
+                                     }
+                                     action_set {
+                                       actions {
+                                         action { name: "NoAction" }
+                                         weight: 301
+                                       }
+                                       actions {
+                                         action { name: "NoAction" }
+                                         weight: 302
+                                       }
+                                     }
+                                   })pb"));
+
+  absl::flat_hash_map<std::string, ActionProfileResourceCapacity>
+      capacity_by_action_profile_name = {
+          {std::string(kActionProfileName),
+           GetActionProfileResourceCapacity(
+               ir_p4info.action_profiles_by_id().at(kActionProfileId))},
+      };
+  absl::flat_hash_map<std::string, int64_t> current_batch_resources;
+
+  EXPECT_THAT(VerifyCapacityAndGetTableResourceChange(
+                  ir_p4info, update, /*entity_cache=*/{},
+                  capacity_by_action_profile_name, current_batch_resources),
+              StatusIs(absl::StatusCode::kInvalidArgument));
+}
+
+TEST(VerifyCapacityAndGetTableResourceChangeTest,
+     RejectsTooManyMembersInSumOfMembers) {
+  constexpr int kSize = 3;
+  constexpr int kMaxGroupSize = 512;
+  constexpr int kMaxMemberWeight = 4096;
+  constexpr int kActionProfileId = 3;
+  constexpr absl::string_view kActionProfileName = "wcmp_selector_profile";
+  const IrActionDefinitionBuilder no_action_builder =
+      IrActionDefinitionBuilder().name("NoAction");
+
+  const pdpi::IrP4Info ir_p4info =
+      IrP4InfoBuilder()
+          .table(IrTableDefinitionBuilder()
+                     .name("wcmp_group_table")
+                     .match_field(R"pb(
+                                    id: 1
+                                    name: "wcmp_group_id"
+                                    match_type: EXACT
+                                  )pb",
+                                  pdpi::Format::STRING)
+                     .entry_action(no_action_builder)
+                     .size(100))
+          .action(no_action_builder)
+          .action_profile(
+              IrActionProfileDefinitionBuilder()
+                  .id(kActionProfileId)
+                  .name(kActionProfileName)
+                  .max_sum_of_members(kSize, kMaxGroupSize, kMaxMemberWeight)
+                  .table_ids({1}))();
+
+  ASSERT_OK_AND_ASSIGN(EntityUpdate update,
+                       GetUpdate(ir_p4info, p4::v1::Update::INSERT,
+                                 R"pb(
+                                   table_entry {
+                                     table_name: "wcmp_group_table"
+                                     matches {
+                                       name: "wcmp_group_id"
+                                       exact { str: "group-1" }
+                                     }
+                                     action_set {
+                                       actions {
+                                         action { name: "NoAction" }
+                                         weight: 500
+                                       }
+                                       actions {
+                                         action { name: "NoAction" }
+                                         weight: 501
+                                       }
+                                       actions {
+                                         action { name: "NoAction" }
+                                         weight: 502
+                                       }
+                                       actions {
+                                         action { name: "NoAction" }
+                                         weight: 503
+                                       }
+                                     }
+                                   })pb"));
+
+  absl::flat_hash_map<std::string, ActionProfileResourceCapacity>
+      capacity_by_action_profile_name = {
+          {std::string(kActionProfileName),
+           GetActionProfileResourceCapacity(
+               ir_p4info.action_profiles_by_id().at(kActionProfileId))},
+      };
+  absl::flat_hash_map<std::string, int64_t> current_batch_resources;
+
+  EXPECT_THAT(VerifyCapacityAndGetTableResourceChange(
+                  ir_p4info, update, /*entity_cache=*/{},
+                  capacity_by_action_profile_name, current_batch_resources),
+              StatusIs(absl::StatusCode::kResourceExhausted));
+}
+
 }  // namespace
 }  // namespace p4rt_app
